@@ -1,12 +1,13 @@
 [package]
 name = "params"
-version = "0.8.0"
+version = "0.9.0"
 authors = ["Skyler Lipthay <skyler.lipthay@gmail.com>"]
 description = "A multi-source request parameters parser for Iron."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/iron/params"
 documentation = "http://ironframework.io/doc/params/index.html"
+edition = "2018"
 
 [dependencies]
 bodyparser = "0.8"

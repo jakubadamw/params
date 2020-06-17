@@ -18,7 +18,7 @@ mod conversion;
 #[cfg(feature = "serde")]
 pub mod serde;
 
-use multipart::server::{Multipart, MultipartData};
+use multipart::server::Multipart;
 use multipart::server::save::SaveDir;
 use iron::{headers, Request};
 use iron::request::Body;
@@ -69,7 +69,7 @@ impl Value {
     fn assign(&mut self, path: &str, value: Value) -> Result<(), ParamsError> {
         assert!(!path.is_empty());
 
-        let (key, remainder) = try!(eat_index(path));
+        let (key, remainder) = eat_index(path)?;
 
         if key.is_empty() {
             match *self {
@@ -79,20 +79,20 @@ impl Value {
                         return Ok(());
                     }
 
-                    let (next_key, _) = try!(eat_index(remainder));
+                    let (next_key, _) = eat_index(remainder)?;
                     if next_key.is_empty() {
                         // Two array indices in a row ("[][]") is illegal.
                         return Err(InvalidPath);
                     }
 
                     if let Some(map) = array.last_mut() {
-                        if !try!(map.contains_key(next_key)) {
+                        if !map.contains_key(next_key)? {
                             return map.assign(remainder, value);
                         }
                     }
 
                     let mut map = Value::Map(Map::new());
-                    try!(map.assign(remainder, value));
+                    map.assign(remainder, value)?;
                     array.push(map);
                     Ok(())
                 },
@@ -106,7 +106,7 @@ impl Value {
                         return Ok(());
                     }
 
-                    let (next_key, _) = try!(eat_index(remainder));
+                    let (next_key, _) = eat_index(remainder)?;
                     let collection = map.0.entry(String::from(key)).or_insert_with(|| {
                         if next_key.is_empty() {
                             Value::Array(vec![])
@@ -233,13 +233,13 @@ impl Map {
     /// assert_eq!(format!("{:?}", map), r#"{"pts": [{"x": 3, "y": 9}]}"#);
     /// ```
     pub fn assign(&mut self, path: &str, value: Value) -> Result<(), ParamsError> {
-        let (base, remainder) = try!(eat_base(path));
+        let (base, remainder) = eat_base(path)?;
         if remainder.is_empty() {
             self.0.insert(String::from(base), value);
             return Ok(());
         }
 
-        let (key, _) = try!(eat_index(remainder));
+        let (key, _) = eat_index(remainder)?;
         let collection = self.0.entry(String::from(base)).or_insert_with(|| {
             if key.is_empty() {
                 Value::Array(vec![])
@@ -248,7 +248,7 @@ impl Map {
             }
         });
 
-        try!(collection.assign(remainder, value));
+        collection.assign(remainder, value)?;
 
         Ok(())
     }
@@ -358,7 +358,7 @@ fn eat_index(path: &str) -> Result<(&str, &str), ParamsError> {
     if !path.starts_with('[') {
         return Err(InvalidPath);
     }
-    let close = try!(path.find(']').ok_or(InvalidPath));
+    let close = path.find(']').ok_or(InvalidPath)?;
     let key = &path[1..close];
     let remainder = &path[1 + close..];
 
@@ -396,24 +396,21 @@ use ParamsError::*;
 
 impl fmt::Display for ParamsError {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        self.description().fmt(f)
+        let s = match *self {
+            BodyError(ref err) => err.to_string(),
+            UrlDecodingError(ref err) => err.to_string(),
+            IoError(ref err) => err.to_string(),
+            InvalidPath => "Invalid parameter path.".to_string(),
+            CannotAppend => "Cannot append to a non-array value.".to_string(),
+            CannotInsert => "Cannot insert into a non-map value.".to_string(),
+            NotJsonObject => "Tried to make a `Map` from a non-object root JSON value.".to_string()
+        };
+        s.fmt(f)
     }
 }
 
 impl StdError for ParamsError {
-    fn description(&self) -> &str {
-        match *self {
-            BodyError(ref err) => err.description(),
-            UrlDecodingError(ref err) => err.description(),
-            IoError(ref err) => err.description(),
-            InvalidPath => "Invalid parameter path.",
-            CannotAppend => "Cannot append to a non-array value.",
-            CannotInsert => "Cannot insert into a non-map value.",
-            NotJsonObject => "Tried to make a `Map` from a non-object root JSON value.",
-        }
-    }
-
-    fn cause(&self) -> Option<&StdError> {
+    fn cause(&self) -> Option<&dyn StdError> {
         match *self {
             BodyError(ref err) => Some(err),
             UrlDecodingError(ref err) => Some(err),
@@ -457,14 +454,14 @@ impl<'a, 'b> Plugin<Request<'a, 'b>> for Params {
     type Error = ParamsError;
 
     fn eval(req: &mut Request) -> Result<Map, ParamsError> {
-        let mut map = try!(try_parse_json_into_map(req));
+        let mut map = try_parse_json_into_map(req)?;
         let has_json_body = !map.is_empty();
-        if let Some(dir) = try!(try_parse_multipart(req, &mut map)) {
+        if let Some(dir) = try_parse_multipart(req, &mut map)? {
             append_multipart_save_dir(req, dir);
         }
-        try!(try_parse_url_encoded::<urlencoded::UrlEncodedQuery>(req, &mut map));
+        try_parse_url_encoded::<urlencoded::UrlEncodedQuery>(req, &mut map)?;
         if !has_json_body {
-            try!(try_parse_url_encoded::<urlencoded::UrlEncodedBody>(req, &mut map));
+            try_parse_url_encoded::<urlencoded::UrlEncodedBody>(req, &mut map)?;
         }
 
         Ok(map)
@@ -484,7 +481,7 @@ fn try_parse_json_into_map(req: &mut Request) -> Result<Map, ParamsError> {
         return Ok(Map::new());
     }
 
-    match *try!(req.get_ref::<bodyparser::Json>()) {
+    match *req.get_ref::<bodyparser::Json>()? {
         Some(ref json) => json.to_map(),
         None => Ok(Map::new()),
     }
@@ -497,7 +494,7 @@ trait ToParams {
 
 impl ToParams for Json {
     fn to_map(&self) -> Result<Map, ParamsError> {
-        match try!(self.to_value()) {
+        match self.to_value()? {
             Value::Map(map) => Ok(map),
             _ => Err(NotJsonObject),
         }
@@ -512,13 +509,16 @@ impl ToParams for Json {
             Json::Bool(value) => Ok(Value::Boolean(value)),
             Json::Null => Ok(Value::Null),
             Json::Array(ref value) => {
-                let result = value.iter().map(|v| v.to_value()).collect();
-                Ok(Value::Array(try!(result)))
+                let result: Result<Vec<_>, _> = value
+                    .iter()
+                    .map(|v| v.to_value())
+                    .collect();
+                Ok(Value::Array(result?))
             },
             Json::Object(ref value) => {
                 let mut result = Map::new();
                 for (key, json) in value {
-                    result.insert(key.clone(), try!(json.to_value()));
+                    result.insert(key.clone(), json.to_value()?);
                 }
 
                 Ok(Value::Map(result))
@@ -568,33 +568,33 @@ fn try_parse_multipart(req: &mut Request, map: &mut Map)
 
     let mut temp_dir = None;
 
-    while let Some(mut field) = try!(multipart.read_entry()) {
+    while let Some(mut field) = multipart.read_entry()? {
         if field.is_text() {
             let mut text = String::new();
-            try!(field.data.read_to_string(&mut text));
-            try!(map.assign(&field.headers.name, Value::String(text)));
+            field.data.read_to_string(&mut text)?;
+            map.assign(&field.headers.name, Value::String(text))?;
         } else {
             if temp_dir.is_none() {
-                temp_dir = Some(try!(TempDir::new()));
+                temp_dir = Some(TempDir::new()?);
             }
             let save_dir = temp_dir.as_ref().unwrap().path();
-            let data: multipart::server::save::SavedData = try!(field.data
+            let data: multipart::server::save::SavedData = field.data
                 .save()
                 .memory_threshold(0)
                 .with_dir(save_dir)
-                .into_result_strict());
+                .into_result_strict()?;
             let (path, size) = match data {
                 multipart::server::save::SavedData::File(path, size) =>
                     (path, size),
                 _ =>
                     panic!("unexpected")
             };
-            try!(map.assign(&field.headers.name, Value::File(File {
+            map.assign(&field.headers.name, Value::File(File {
                 path: path,
                 filename: field.headers.filename,
                 size: size,
                 content_type: field.headers.content_type.unwrap_or(mime::TEXT_PLAIN),
-            })));
+            }))?;
         }
     }
 
@@ -630,7 +630,7 @@ fn try_parse_url_encoded<'a, 'b, P>(req: &mut Request<'a, 'b>, map: &mut Map)
 
     for (path, vec) in hash_map {
         for value in vec {
-            try!(map.assign(&path, Value::String(value)));
+            map.assign(&path, Value::String(value))?;
         }
     }
 
