@@ -11,8 +11,8 @@ extern crate plugin;
 #[macro_use]
 extern crate serde as serde_crate;
 extern crate serde_json;
+extern crate tempfile;
 extern crate urlencoded;
-extern crate tempdir;
 
 mod conversion;
 #[cfg(feature = "serde")]
@@ -20,8 +20,7 @@ pub mod serde;
 
 use multipart::server::{Multipart, MultipartData};
 use multipart::server::save::SaveDir;
-use iron::{headers, mime, Request};
-use iron::mime::Mime;
+use iron::{headers, Request};
 use iron::request::Body;
 use iron::typemap::Key;
 use plugin::{Extensible, Pluggable, Plugin};
@@ -32,7 +31,7 @@ use std::{fmt, fs};
 use std::io;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
-use tempdir::TempDir;
+use tempfile::TempDir;
 pub use conversion::FromValue;
 
 /// A representation of all possible types of request parameters.
@@ -172,7 +171,7 @@ pub struct File {
     /// # Warning
     ///
     /// You should treat this value as untrustworthy because it can be spoofed by the client.
-    pub content_type: Mime,
+    pub content_type: mime::Mime,
 }
 
 impl File {
@@ -473,6 +472,7 @@ impl<'a, 'b> Plugin<Request<'a, 'b>> for Params {
 }
 
 fn try_parse_json_into_map(req: &mut Request) -> Result<Map, ParamsError> {
+    use iron::mime::{self, Mime};
     let need_parse = req.headers.get::<headers::ContentType>().map(|header| {
         match **header {
             Mime(mime::TopLevel::Application, mime::SubLevel::Json, _) => true,
@@ -530,6 +530,8 @@ impl ToParams for Json {
 fn try_parse_multipart(req: &mut Request, map: &mut Map)
     -> Result<Option<SaveDir>, ParamsError>
 {
+    use std::io::Read;
+
     // This is a wrapper that allows an Iron request to be processed by the `multipart` crate. Its
     // implementation of `multipart::server::HttpRequest` is taken from `multipart` itself, which
     // requires the `iron` crate feature on compilation. To minimize a messy dependency graph that
@@ -541,6 +543,7 @@ fn try_parse_multipart(req: &mut Request, map: &mut Map)
         type Body = &'r mut Body<'a, 'b>;
 
         fn multipart_boundary(&self) -> Option<&str> {
+            use iron::mime::{self, Mime};
             let content_type = match self.0.headers.get::<headers::ContentType>() {
                 Some(content_type) => content_type,
                 None => return None,
@@ -565,24 +568,33 @@ fn try_parse_multipart(req: &mut Request, map: &mut Map)
 
     let mut temp_dir = None;
 
-    while let Some(field) = try!(multipart.read_entry()) {
-        match field.data {
-            MultipartData::Text(text) => {
-                try!(map.assign(&field.name, Value::String(text.into())));
-            },
-            MultipartData::File(mut file) => {
-                if temp_dir.is_none() {
-                    temp_dir = Some(try!(TempDir::new("multipart")));
-                }
-                let save_dir = temp_dir.as_ref().unwrap().path();
-                let saved_file = try!(file.save().with_dir(save_dir).into_result_strict());
-                try!(map.assign(&field.name, Value::File(File {
-                    path: saved_file.path,
-                    filename: saved_file.filename,
-                    size: saved_file.size,
-                    content_type: file.content_type.clone(),
-                })));
-            },
+    while let Some(mut field) = try!(multipart.read_entry()) {
+        if field.is_text() {
+            let mut text = String::new();
+            try!(field.data.read_to_string(&mut text));
+            try!(map.assign(&field.headers.name, Value::String(text)));
+        } else {
+            if temp_dir.is_none() {
+                temp_dir = Some(try!(TempDir::new()));
+            }
+            let save_dir = temp_dir.as_ref().unwrap().path();
+            let data: multipart::server::save::SavedData = try!(field.data
+                .save()
+                .memory_threshold(0)
+                .with_dir(save_dir)
+                .into_result_strict());
+            let (path, size) = match data {
+                multipart::server::save::SavedData::File(path, size) =>
+                    (path, size),
+                _ =>
+                    panic!("unexpected")
+            };
+            try!(map.assign(&field.headers.name, Value::File(File {
+                path: path,
+                filename: field.headers.filename,
+                size: size,
+                content_type: field.headers.content_type.unwrap_or(mime::TEXT_PLAIN),
+            })));
         }
     }
 
